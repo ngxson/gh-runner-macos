@@ -7,7 +7,7 @@ A GitHub Actions self-hosted runner for macOS that creates a fresh non-admin OS 
 A Python orchestrator runs as root. It polls the GitHub API for queued workflow runs, and for each job it:
 
 1. Creates a temporary macOS user (`ghr_NNNNN`, non-admin, no sudo)
-2. Hard-links the runner binary into that user's home directory
+2. Hard-links the runner binary into that user's job directory
 3. Fetches a single-use JIT registration token from GitHub
 4. Runs the GitHub Actions runner as that user
 5. Deletes the user and all their files when the job exits
@@ -16,56 +16,53 @@ A Python orchestrator runs as root. It polls the GitHub API for queued workflow 
 
 - macOS 13+ (Ventura or later)
 - Admin account (to run with sudo)
-- Python 3.9+ (`brew install python3` if the system stub is not enough)
-- Xcode Command Line Tools (`xcode-select --install`)
+- Python 3.9+
 - A GitHub fine-grained Personal Access Token with two repository permissions:
   - Actions: Read-only (poll for queued runs)
   - Self-hosted runners: Read and write (generate JIT tokens)
-  - Classic PATs cannot express these permissions this narrowly, so use a fine-grained token
+
+Note: classic PATs cannot express these permissions this narrowly. Use a fine-grained token.
+
+For org repos, self-hosted runners may appear under Organization permissions rather than Repository permissions. The org must also allow fine-grained PATs under Settings > Actions > Runner groups.
 
 ## Setup
 
-Clone the repo, then run setup once as root. All files stay inside the repo directory.
-
 ```
-git clone https://github.com/(this_repo)
+git clone <this repo>
 cd gh-runner-macos
-sudo bash setup.sh
+cp config.env.example config.env
+chmod 600 config.env
+nano config.env
 ```
 
-This creates `runner-template/`, `jobs/`, `logs/`, and `config.env` inside the repo directory.
-
-Edit the config:
-
-```
-sudo nano config.env
-```
-
-Minimum required values:
+Fill in at minimum:
 
 ```
 GITHUB_TOKEN=github_pat_...
-GITHUB_OWNER=your-username
+GITHUB_OWNER=your-username-or-org
 GITHUB_REPO=your-repository
+RUNNER_DOWNLOAD_URL=https://github.com/actions/runner/releases/download/vX.Y.Z/actions-runner-osx-arm64-X.Y.Z.tar.gz
 ```
 
-See `config.env.example` for all options. `config.env` is automatically added to `.gitignore` by setup.
+Get the download URL from https://github.com/actions/runner/releases. Use `arm64` for Apple Silicon, `x64` for Intel. See `config.env.example` for all options.
 
-## Starting the runner
+## Running
 
-Run this from your admin account on each boot (or after login):
+From your admin account:
 
 ```
-sudo python3 orchestrator.py
+sudo python3 start.py
 ```
 
-Press Ctrl-C or send SIGTERM to stop. The orchestrator will wait for any active jobs to finish before exiting.
+On first run, the runner binary is downloaded from `RUNNER_DOWNLOAD_URL`, its SHA-256 is printed to stdout, and it is extracted into `runner-template/`. Subsequent starts skip the download.
 
-Logs are written to `logs/orchestrator.log` and per-job logs go to `logs/jobs/`.
+Press Ctrl-C to stop. The orchestrator waits for active jobs to finish. Press Ctrl-C again to force quit immediately.
 
-## Updating
+Logs are written to `logs/orchestrator.log`. Per-job logs go to `logs/jobs/`.
 
-To update the runner binary version, change `RUNNER_VERSION` at the top of `setup.sh` and re-run it. It will skip the download if the version is already current.
+## Upgrading the runner binary
+
+Update `RUNNER_DOWNLOAD_URL` in `config.env`, delete `runner-template/`, then restart.
 
 ## Security properties
 
@@ -73,12 +70,13 @@ To update the runner binary version, change `RUNNER_VERSION` at the top of `setu
 - `TMPDIR` is overridden per user so jobs cannot read each other's temp files
 - The JIT registration token is written to a `chmod 600` file rather than passed as a CLI argument, so it does not appear in `ps` output
 - The runner subprocess receives a clean environment — no credentials from the orchestrator are inherited
-- Each user has their own keychain (macOS default), so code signing certificates and stored credentials are not shared between jobs
+- Each user has their own keychain, so stored credentials are not shared between jobs
 - User home directories (including `~/Library/LaunchAgents`) are deleted after each job, preventing persistent backdoors
+- `config.env` must be `chmod 600` or the orchestrator refuses to start
 - Stale users from a prior crash are cleaned up automatically on startup
 
 ## Known limitations
 
-- Homebrew is shared across jobs. A job can install packages that persist after it finishes. Set `HOMEBREW_NO_AUTO_UPDATE=1` (already set by the orchestrator) to at least prevent auto-updates during jobs.
-- macOS has no `hidepid` equivalent, so all users can see each other's process names via `ps aux`. The orchestrator avoids passing secrets as arguments for this reason.
+- Homebrew is shared across jobs. A job can install packages that persist after it finishes.
+- macOS has no `hidepid` equivalent, so all users can see each other's process names via `ps aux`. Secrets are kept out of CLI arguments for this reason.
 - There is no network isolation between jobs.
